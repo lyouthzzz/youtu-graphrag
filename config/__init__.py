@@ -22,7 +22,6 @@ __all__ = [
     "ConfigManager",
     "get_config", 
     "reload_config",
-    "APIConfig",
     "DatasetConfig", 
     "TriggersConfig",
     "ConstructionConfig",

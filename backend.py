@@ -18,7 +18,7 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # FastAPI imports
-from fastapi import FastAPI, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,7 @@ from pydantic import BaseModel
 import uvicorn
 
 from utils.logger import logger
+from utils import graph_processor
 import ast
 
 # Import document parser
@@ -46,6 +47,15 @@ try:
 except ImportError as e:
     GRAPHRAG_AVAILABLE = False
     logger.error(f"⚠️  GraphRAG components not available: {e}")
+
+# Knowledge base store (file-system database)
+try:
+    from utils import kb_store
+    KB_STORE_AVAILABLE = True
+except ImportError as e:
+    KB_STORE_AVAILABLE = False
+    kb_store = None
+    logger.warning(f"KB store not available: {e}")
 
 app = FastAPI(title="Youtu-GraphRAG Unified Interface", version="1.0.0")
 
@@ -98,7 +108,9 @@ class FileUploadResponse(BaseModel):
 
 class GraphConstructionRequest(BaseModel):
     dataset_name: str
-    
+    kb_id: Optional[str] = None  # If set, use this knowledge base's schema and construction prompt
+    incremental: Optional[bool] = False  # If true, merge new extractions with existing graph
+
 class GraphConstructionResponse(BaseModel):
     success: bool
     message: str
@@ -107,6 +119,7 @@ class GraphConstructionResponse(BaseModel):
 class QuestionRequest(BaseModel):
     question: str
     dataset_name: str
+    kb_id: Optional[str] = None  # If set, use this knowledge base's schema and prompts
 
 class QuestionResponse(BaseModel):
     answer: str
@@ -266,8 +279,44 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
     except WebSocketDisconnect:
         manager.disconnect(client_id)
 
+def _resolve_schema_source(schema_source_id: Optional[str]) -> Optional[Dict]:
+    """Resolve schema_source_id (kb:xxx or file:name) to schema dict. Returns None if invalid."""
+    if not schema_source_id or ":" not in schema_source_id:
+        return None
+    kind, key = schema_source_id.split(":", 1)
+    if kind == "kb" and KB_STORE_AVAILABLE and kb_store:
+        kb = kb_store.get_knowledge_base(key)
+        return kb.get("schema") if kb else None
+    if kind == "file":
+        path = f"schemas/{key}.json" if not key.endswith(".json") else f"schemas/{key}"
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    return None
+
+
+@app.get("/api/schemas")
+async def list_available_schemas():
+    """List available schemas: from knowledge bases and from schemas/*.json."""
+    result = []
+    if KB_STORE_AVAILABLE and kb_store:
+        for kb in kb_store.list_knowledge_bases():
+            result.append({"id": f"kb:{kb['id']}", "name": kb.get("name", kb["id"]), "type": "kb", "dataset_name": kb.get("dataset_name", "")})
+    schemas_dir = "schemas"
+    if os.path.isdir(schemas_dir):
+        for f in os.listdir(schemas_dir):
+            if f.endswith(".json"):
+                name = f[:-5]
+                result.append({"id": f"file:{name}", "name": name, "type": "file", "path": f"{schemas_dir}/{f}"})
+    return {"schemas": result}
+
+
 @app.post("/api/upload", response_model=FileUploadResponse)
-async def upload_files(files: List[UploadFile] = File(...), client_id: str = "default"):
+async def upload_files(
+    files: List[UploadFile] = File(...),
+    schema_source_id: Optional[str] = Form(None),
+    client_id: str = "default",
+):
     """Upload files and prepare for graph construction"""
     try:
         # Generate dataset name based on file count
@@ -392,6 +441,16 @@ async def upload_files(files: List[UploadFile] = File(...), client_id: str = "de
         corpus_path = f"{upload_dir}/corpus.json"
         with open(corpus_path, 'w', encoding='utf-8') as f:
             json.dump(corpus_data, f, ensure_ascii=False, indent=2)
+
+        # If schema_source_id provided, copy that schema to schemas/{dataset_name}.json
+        if schema_source_id:
+            schema_dict = _resolve_schema_source(schema_source_id)
+            if schema_dict:
+                os.makedirs("schemas", exist_ok=True)
+                schema_path = f"schemas/{dataset_name}.json"
+                with open(schema_path, 'w', encoding='utf-8') as f:
+                    json.dump(schema_dict, f, ensure_ascii=False, indent=2)
+                logger.info(f"Applied schema from {schema_source_id} to {schema_path}")
         
         # Create dataset configuration
         await create_dataset_config()
@@ -417,6 +476,23 @@ async def create_dataset_config():
     # Ensure default demo schema exists
     ensure_demo_schema_exists()
 
+def _resolve_kb_schema_and_prompts(kb_id: Optional[str]):
+    """If kb_id is set and KB store is available, return (schema_dict, construction_prompt, decomposition_prompt, retrieval_prompt). Else (None, None, None, None)."""
+    if not kb_id or not KB_STORE_AVAILABLE or kb_store is None:
+        return None, None, None, None
+    kb = kb_store.get_knowledge_base(kb_id)
+    if kb is None:
+        return None, None, None, None
+    schema = kb.get("schema")
+    prompts = kb.get("prompts") or {}
+    return (
+        schema,
+        prompts.get("construction") or None,
+        prompts.get("decomposition") or None,
+        prompts.get("retrieval") or None,
+    )
+
+
 @app.post("/api/construct-graph", response_model=GraphConstructionResponse)
 async def construct_graph(request: GraphConstructionRequest, client_id: str = "default"):
     """Construct knowledge graph from uploaded data"""
@@ -424,6 +500,7 @@ async def construct_graph(request: GraphConstructionRequest, client_id: str = "d
         if not GRAPHRAG_AVAILABLE:
             raise HTTPException(status_code=503, detail="GraphRAG components not available. Please install or configure them.")
         dataset_name = request.dataset_name
+        kb_id = getattr(request, "kb_id", None)
         
         await send_progress_update(client_id, "construction", 2, "Cleaning old cache files...")
         
@@ -434,8 +511,16 @@ async def construct_graph(request: GraphConstructionRequest, client_id: str = "d
         
         # Get dataset paths
         corpus_path = f"data/uploaded/{dataset_name}/corpus.json" 
-        # Choose schema: dataset-specific or default demo
+        # Choose schema: from KB if kb_id, else dataset-specific or default demo
         schema_path = get_schema_path_for_dataset(dataset_name)
+        schema_dict = None
+        construction_prompt_template = None
+        if kb_id:
+            sk, cp, _dp, _rp = _resolve_kb_schema_and_prompts(kb_id)
+            if sk is not None:
+                schema_dict = sk
+            if cp:
+                construction_prompt_template = cp
         
         if not os.path.exists(corpus_path):
             # Try demo dataset
@@ -451,24 +536,24 @@ async def construct_graph(request: GraphConstructionRequest, client_id: str = "d
         if config is None:
             config = get_config("config/base_config.yaml")
         
-        # Initialize KTBuilder
+        # Initialize KTBuilder (with optional KB schema and construction prompt)
         builder = constructor.KTBuilder(
             dataset_name,
-            schema_path,
+            schema_path=None if schema_dict else schema_path,
             mode=config.construction.mode,
-            config=config
+            config=config,
+            schema_dict=schema_dict,
+            construction_prompt_template=construction_prompt_template,
         )
         
         await send_progress_update(client_id, "construction", 20, "Starting entity-relation extraction...")
         
-        # Build knowledge graph
+        # Build knowledge graph (optional incremental)
+        incremental = getattr(request, "incremental", False)
         def build_graph_sync():
-            return builder.build_knowledge_graph(corpus_path)
+            return builder.build_knowledge_graph(corpus_path, incremental=incremental)
         
-        # Run in executor to avoid blocking
         loop = asyncio.get_event_loop()
-        
-        # Run graph construction without simulated progress updates
         knowledge_graph = await loop.run_in_executor(None, build_graph_sync)
         
         await send_progress_update(client_id, "construction", 95, "Preparing visualization data...")
@@ -668,11 +753,28 @@ async def ask_question(request: QuestionRequest, client_id: str = "default"):
             raise HTTPException(status_code=503, detail="GraphRAG components not available. Please install or configure them.")
         dataset_name = request.dataset_name
         question = request.question
+        kb_id = getattr(request, "kb_id", None)
 
         await send_progress_update(client_id, "retrieval", 10, "Initializing retrieval system (agent mode)...")
 
         graph_path = f"output/graphs/{dataset_name}_new.json"
         schema_path = get_schema_path_for_dataset(dataset_name)
+        schema_str = None
+        decomposition_prompt_template = None
+        retrieval_prompt_template = None
+        if kb_id and KB_STORE_AVAILABLE and kb_store:
+            kb = kb_store.get_knowledge_base(kb_id)
+            if kb:
+                prompts = kb.get("prompts") or {}
+                decomposition_prompt_template = prompts.get("decomposition") or None
+                retrieval_prompt_template = prompts.get("retrieval") or None
+                schema_obj = kb.get("schema")
+                if schema_obj:
+                    schema_str = json.dumps(schema_obj, ensure_ascii=False)
+                else:
+                    sp = kb_store.get_schema_path_for_kb(kb_id)
+                    if sp:
+                        schema_path = sp
         if not os.path.exists(graph_path):
             graph_path = "output/graphs/demo_new.json"
         if not os.path.exists(graph_path):
@@ -683,7 +785,11 @@ async def ask_question(request: QuestionRequest, client_id: str = "default"):
         if config is None:
             config = get_config("config/base_config.yaml")
 
-        graphq = decomposer.GraphQ(dataset_name, config=config)
+        graphq = decomposer.GraphQ(
+            dataset_name,
+            config=config,
+            decomposition_prompt_template=decomposition_prompt_template,
+        )
         kt_retriever = retriever.KTRetriever(
             dataset_name,
             graph_path,
@@ -691,7 +797,8 @@ async def ask_question(request: QuestionRequest, client_id: str = "default"):
             schema_path=schema_path,
             top_k=config.retrieval.top_k_filter,
             mode="agent",  # force agent mode
-            config=config
+            config=config,
+            retrieval_prompt_template=retrieval_prompt_template,
         )
 
         await send_progress_update(client_id, "retrieval", 40, "Building indices...")
@@ -724,7 +831,7 @@ async def ask_question(request: QuestionRequest, client_id: str = "default"):
         try:
             # Offload decomposition to executor
             loop = asyncio.get_running_loop()
-            decomposition = await loop.run_in_executor(None, lambda: graphq.decompose(question, schema_path))
+            decomposition = await loop.run_in_executor(None, lambda: graphq.decompose(question, schema_path=schema_path, schema_str=schema_str))
             sub_questions = decomposition.get("sub_questions", [])
             involved_types = decomposition.get("involved_types", {})
             try:
@@ -1078,9 +1185,124 @@ async def get_datasets():
     
     return {"datasets": datasets}
 
+
+# ---------- Knowledge Base (file-system database) API ----------
+@app.get("/api/knowledge-bases")
+async def list_knowledge_bases():
+    """List all knowledge bases (schema + prompts managed by file-system store)."""
+    if not KB_STORE_AVAILABLE or kb_store is None:
+        return {"knowledge_bases": []}
+    try:
+        kbs = kb_store.list_knowledge_bases()
+        return {"knowledge_bases": kbs}
+    except Exception as e:
+        logger.error(f"Failed to list knowledge bases: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/knowledge-bases/{kb_id}")
+async def get_knowledge_base(kb_id: str):
+    """Get a single knowledge base by id (meta, schema, prompts)."""
+    if not KB_STORE_AVAILABLE or kb_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge base store not available")
+    kb = kb_store.get_knowledge_base(kb_id)
+    if kb is None:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    return kb
+
+
+class KBCreateRequest(BaseModel):
+    name: str
+    dataset_name: str
+    schema: Optional[Dict] = None
+    prompts: Optional[Dict[str, str]] = None
+
+
+class KBUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    dataset_name: Optional[str] = None
+    schema: Optional[Dict] = None
+    prompts: Optional[Dict[str, str]] = None
+
+
+@app.post("/api/knowledge-bases")
+async def create_knowledge_base(body: KBCreateRequest):
+    """Create a new knowledge base with schema and prompts."""
+    if not KB_STORE_AVAILABLE or kb_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge base store not available")
+    try:
+        kb = kb_store.create_knowledge_base(
+            name=body.name,
+            dataset_name=body.dataset_name,
+            schema=body.schema,
+            prompts=body.prompts,
+        )
+        return kb
+    except Exception as e:
+        logger.error(f"Failed to create knowledge base: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/api/knowledge-bases/{kb_id}")
+async def update_knowledge_base(kb_id: str, body: KBUpdateRequest):
+    """Update an existing knowledge base."""
+    if not KB_STORE_AVAILABLE or kb_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge base store not available")
+    kb = kb_store.update_knowledge_base(
+        kb_id,
+        name=body.name,
+        dataset_name=body.dataset_name,
+        schema=body.schema,
+        prompts=body.prompts,
+    )
+    if kb is None:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    return kb
+
+
+@app.delete("/api/knowledge-bases/{kb_id}")
+async def delete_knowledge_base(kb_id: str):
+    """Delete a knowledge base."""
+    if not KB_STORE_AVAILABLE or kb_store is None:
+        raise HTTPException(status_code=503, detail="Knowledge base store not available")
+    ok = kb_store.delete_knowledge_base(kb_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Knowledge base not found")
+    return {"success": True, "message": "Knowledge base deleted"}
+
+
+@app.get("/api/datasets/{dataset_name}/schema")
+async def get_dataset_schema(dataset_name: str):
+    """Get current schema for a dataset (from schemas/{dataset_name}.json or default demo)."""
+    if dataset_name == "demo":
+        path = ensure_demo_schema_exists()
+    else:
+        path = f"schemas/{dataset_name}.json"
+        if not os.path.exists(path):
+            path = ensure_demo_schema_exists()
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+class SchemaUpdateBody(BaseModel):
+    schema: Dict
+
+
+@app.put("/api/datasets/{dataset_name}/schema")
+async def update_dataset_schema(dataset_name: str, body: SchemaUpdateBody):
+    """Update schema for a dataset (JSON body)."""
+    if dataset_name == "demo":
+        raise HTTPException(status_code=400, detail="Cannot modify schema for demo dataset")
+    os.makedirs("schemas", exist_ok=True)
+    path = f"schemas/{dataset_name}.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(body.schema, f, ensure_ascii=False, indent=2)
+    return {"success": True, "message": "Schema updated", "dataset_name": dataset_name}
+
+
 @app.post("/api/datasets/{dataset_name}/schema")
 async def upload_schema(dataset_name: str, schema_file: UploadFile = File(...)):
-    """Upload a custom schema JSON for a dataset."""
+    """Upload a custom schema JSON file for a dataset."""
     try:
         if dataset_name == "demo":
             raise HTTPException(status_code=400, detail="Cannot upload schema for demo dataset")
@@ -1271,6 +1493,37 @@ async def get_graph_data(dataset_name: str):
     
     return await prepare_graph_visualization(graph_path)
 
+
+class GraphMergeRequest(BaseModel):
+    source_datasets: List[str]  # dataset names whose graphs to merge
+    target_name: str  # output graph name (saved as output/graphs/{target_name}_new.json)
+
+
+@app.post("/api/graph/merge")
+async def merge_graphs(request: GraphMergeRequest):
+    """Merge multiple graphs into one. Source graphs must exist (output/graphs/{name}_new.json)."""
+    if not request.source_datasets or not request.target_name.strip():
+        raise HTTPException(status_code=400, detail="source_datasets and target_name required")
+    paths = []
+    for name in request.source_datasets:
+        path = f"output/graphs/{name}_new.json"
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail=f"Graph not found for dataset: {name}")
+        paths.append(path)
+    out_path = f"output/graphs/{request.target_name.strip()}_new.json"
+    try:
+        graph_processor.merge_graphs_from_paths(paths, out_path)
+        return {
+            "success": True,
+            "message": f"Merged {len(paths)} graphs into {request.target_name}",
+            "target_name": request.target_name,
+            "graph_path": out_path,
+        }
+    except Exception as e:
+        logger.error(f"Graph merge failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize on startup"""
@@ -1278,7 +1531,8 @@ async def startup_event():
     os.makedirs("output/graphs", exist_ok=True)
     os.makedirs("output/logs", exist_ok=True)
     os.makedirs("schemas", exist_ok=True)
-    
+    if KB_STORE_AVAILABLE and kb_store is not None:
+        os.makedirs(kb_store.KB_STORE_ROOT, exist_ok=True)
     logger.info("🚀 Youtu-GraphRAG Unified Interface initialized")
 
 if __name__ == "__main__":

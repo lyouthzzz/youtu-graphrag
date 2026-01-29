@@ -1,5 +1,6 @@
-import networkx as nx
+import os
 import json
+import networkx as nx
 
 from utils.logger import logger
 
@@ -109,6 +110,81 @@ def load_graph_from_json(input_path: str) -> nx.MultiDiGraph:
         graph.add_edge(start_id, end_id, relation=relation)
     
     return graph
+
+
+def load_graph_from_relationships(relationships: list) -> nx.MultiDiGraph:
+    """
+    Build a MultiDiGraph from a list of relationship dicts (same format as load_graph_from_json).
+    Deduplicates nodes by (label, name).
+    """
+    graph = nx.MultiDiGraph()
+    node_mapping = {}
+    node_counter = 0
+    for rel in relationships:
+        start_node_data = rel["start_node"]
+        end_node_data = rel["end_node"]
+        relation = rel["relation"]
+        start_name = start_node_data["properties"].get("name", "")
+        if isinstance(start_name, list):
+            start_name = ", ".join(str(item) for item in start_name)
+        elif not isinstance(start_name, str):
+            start_name = str(start_name)
+        start_key = (start_node_data["label"], start_name)
+        if start_key not in node_mapping:
+            node_id = f"{start_node_data['label']}_{node_counter}"
+            node_mapping[start_key] = node_id
+            node_counter += 1
+            node_attrs = {
+                "label": start_node_data["label"],
+                "properties": start_node_data["properties"]
+            }
+            level = 1 if start_node_data["label"] == "attribute" else (2 if start_node_data["label"] == "entity" else (3 if start_node_data["label"] == "keyword" else (4 if start_node_data["label"] == "community" else 2)))
+            node_attrs["level"] = level
+            graph.add_node(node_id, **node_attrs)
+        end_name = end_node_data["properties"].get("name", "")
+        if isinstance(end_name, list):
+            end_name = ", ".join(str(item) for item in end_name)
+        elif not isinstance(end_name, str):
+            end_name = str(end_name)
+        end_key = (end_node_data["label"], end_name)
+        if end_key not in node_mapping:
+            node_id = f"{end_node_data['label']}_{node_counter}"
+            node_mapping[end_key] = node_id
+            node_counter += 1
+            node_attrs = {
+                "label": end_node_data["label"],
+                "properties": end_node_data["properties"]
+            }
+            level = 1 if end_node_data["label"] == "attribute" else (2 if end_node_data["label"] == "entity" else (3 if end_node_data["label"] == "keyword" else (4 if end_node_data["label"] == "community" else 2)))
+            node_attrs["level"] = level
+            graph.add_node(node_id, **node_attrs)
+        start_id = node_mapping[start_key]
+        end_id = node_mapping[end_key]
+        graph.add_edge(start_id, end_id, relation=relation)
+    return graph
+
+
+def merge_graphs_from_paths(input_paths: list, output_path: str) -> nx.MultiDiGraph:
+    """
+    Load one or more graph JSON files, merge relationships (dedup nodes by label+name), save to output_path.
+    """
+    all_relationships = []
+    for path in input_paths:
+        if not path or not os.path.exists(path):
+            continue
+        with open(path, 'r', encoding='utf-8') as f:
+            rels = json.load(f)
+        if isinstance(rels, list):
+            all_relationships.extend(rels)
+    if not all_relationships:
+        logger.warning("No relationships to merge")
+        merged = nx.MultiDiGraph()
+    else:
+        merged = load_graph_from_relationships(all_relationships)
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    save_graph_to_json(merged, output_path)
+    logger.info(f"Merged {len(input_paths)} graphs -> {output_path} ({len(merged.nodes())} nodes, {len(merged.edges())} edges)")
+    return merged
 
 
 def save_graph_to_json(graph: nx.MultiDiGraph, output_path: str):

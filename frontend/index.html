@@ -1039,6 +1039,7 @@
         <div class="tabs">
             <div class="tab active" id="tabDashboard" onclick="switchTab('dashboard')">📊 Dashboard</div>
             <div class="tab" id="tabUpload" onclick="switchTab('upload')">📤 Data Upload</div>
+            <div class="tab" id="tabKb" onclick="switchTab('kb')">📚 Knowledge Base</div>
             <div class="tab" id="tabGraph" onclick="switchTab('graph')">🕸️ Graph Visualization</div>
             <div class="tab" id="tabQA" onclick="switchTab('qa')">🤖 Q&A Interface</div>
         </div>
@@ -1080,10 +1081,62 @@
             </div>
         </div>
 
+        <!-- Knowledge Base Tab -->
+        <div id="kb" class="tab-content">
+            <div class="card">
+                <h2 id="kbTitle">Knowledge Base Configuration</h2>
+                <p id="kbDesc" style="color: rgba(255,255,255,0.8); margin-bottom: 16px;">Manage schema, construction, decomposition and retrieval prompts per knowledge base. Select a KB when constructing or asking to use its config.</p>
+                <div class="input-group">
+                    <button class="btn btn-primary" id="kbCreateBtn" onclick="openKbForm()">➕ Create Knowledge Base</button>
+                </div>
+                <div id="kbList" style="margin-top: 20px;"></div>
+            </div>
+            <!-- KB Create/Edit Form (hidden by default) -->
+            <div class="card hidden" id="kbFormCard">
+                <h3 id="kbFormTitle">Create Knowledge Base</h3>
+                <div class="input-group">
+                    <label id="kbFormNameLabel">Name</label>
+                    <input type="text" class="input" id="kbFormName" placeholder="My Knowledge Base">
+                </div>
+                <div class="input-group">
+                    <label id="kbFormDatasetLabel">Dataset</label>
+                    <select class="select" id="kbFormDataset">
+                        <option value="">Select dataset...</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label id="kbFormSchemaLabel">Schema (JSON: Nodes, Relations, Attributes)</label>
+                    <textarea class="textarea" id="kbFormSchema" rows="10" placeholder='{"Nodes": ["person", "location"], "Relations": ["related_to"], "Attributes": ["name"]}'></textarea>
+                </div>
+                <div class="input-group">
+                    <label id="kbFormConstructionLabel">Construction Prompt (placeholders: {schema}, {chunk})</label>
+                    <textarea class="textarea" id="kbFormConstruction" rows="6" placeholder="Use {schema} and {chunk} in your prompt..."></textarea>
+                </div>
+                <div class="input-group">
+                    <label id="kbFormDecompositionLabel">Decomposition Prompt (placeholders: {ontology}, {question})</label>
+                    <textarea class="textarea" id="kbFormDecomposition" rows="6" placeholder="Use {ontology} and {question}..."></textarea>
+                </div>
+                <div class="input-group">
+                    <label id="kbFormRetrievalLabel">Retrieval Prompt (placeholders: {question}, {context})</label>
+                    <textarea class="textarea" id="kbFormRetrieval" rows="6" placeholder="Use {question} and {context}..."></textarea>
+                </div>
+                <div class="input-group">
+                    <button class="btn btn-primary" id="kbFormSaveBtn" onclick="saveKb()">Save</button>
+                    <button class="btn btn-secondary" onclick="closeKbForm()">Cancel</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Upload Tab -->
         <div id="upload" class="tab-content">
             <div class="card">
-                                <h2 id="uploadDocumentsTitle">Upload Documents</h2>
+                <h2 id="uploadDocumentsTitle">Upload Documents</h2>
+                <div class="input-group">
+                    <label id="labelUploadSchema">Schema (optional, for this upload):</label>
+                    <select class="select" id="uploadSchema">
+                        <option value="">Default (use dataset default later)</option>
+                    </select>
+                </div>
                 <div class="upload-area" id="uploadArea">
                     <div class="upload-icon">📁</div>
                                         <h3 id="uploadDragTitle">Drag & Drop Files Here</h3>
@@ -1126,8 +1179,45 @@
 
             <div class="card">
                 <h2 id="availableDatasetsTitle">Available Datasets</h2>
+                <div class="input-group">
+                    <label id="labelUploadKb">Use knowledge base (optional, for construct):</label>
+                    <select class="select" id="uploadKb">
+                        <option value="">Use default config</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label id="labelConstructIncremental"><input type="checkbox" id="constructIncremental" style="margin-right:8px;">Incremental update (merge with existing graph)</label>
+                </div>
                 <div id="datasetsList"></div>
             </div>
+        </div>
+
+        <!-- Edit Schema Modal (hidden by default) -->
+        <div id="editSchemaModal" class="card hidden" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100;max-width:90%;max-height:90vh;overflow:auto;">
+            <h3 id="editSchemaModalTitle">Edit Schema</h3>
+            <div class="input-group">
+                <textarea class="textarea" id="editSchemaText" rows="14" style="font-family:monospace;"></textarea>
+            </div>
+            <div class="input-group">
+                <button class="btn btn-primary" onclick="saveDatasetSchema()">Save Schema</button>
+                <button class="btn btn-secondary" onclick="closeEditSchemaModal()">Cancel</button>
+            </div>
+        </div>
+        <div id="editSchemaModalBackdrop" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99;" onclick="closeEditSchemaModal()"></div>
+
+        <!-- Merge Graphs Card -->
+        <div class="card" id="mergeGraphsCard" style="margin-top:20px;">
+            <h2 id="mergeGraphsTitle">Merge Graphs</h2>
+            <p id="mergeGraphsDesc" style="color:rgba(255,255,255,0.8);margin-bottom:12px;">Select two or more datasets with constructed graphs, then merge into a new graph.</p>
+            <div class="input-group">
+                <label id="labelMergeSources">Source datasets (with graphs):</label>
+                <div id="mergeSourcesList" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
+            </div>
+            <div class="input-group">
+                <label id="labelMergeTarget">Target graph name:</label>
+                <input type="text" class="input" id="mergeTargetName" placeholder="merged_graph">
+            </div>
+            <button class="btn btn-primary" id="mergeGraphsBtn" onclick="mergeGraphs()">Merge Graphs</button>
         </div>
 
         <!-- Graph Tab -->
@@ -1152,6 +1242,12 @@
                     <label id="labelQADataset">Dataset:</label>
                     <select class="select" id="qaDataset">
                         <option value="">Select a dataset...</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label id="labelQAKb">Knowledge Base (optional):</label>
+                    <select class="select" id="qaKb">
+                        <option value="">Use default config</option>
                     </select>
                 </div>
                 <div class="input-group">
@@ -1191,9 +1287,11 @@
         // Global variables
         let selectedFiles = [];
         let datasets = [];
+        let knowledgeBases = [];
         let currentDataset = null;
         let graphChart = null;
-        // let queryChart = null;
+        let editingKbId = null;
+        let editingSchemaDatasetName = null;
         let questionCount = 0;
 
         // i18n configuration: default to English; switch to Chinese when lang starts with 'zh'
@@ -1203,7 +1301,7 @@
                 processing: 'Processing your question...',
                 pleaseSelectAndEnter: 'Please select a dataset and enter a question',
                 subtitle: '✨ Vertically Unified Agents for Graph Retrieval-Augmented Complex Reasoning ✨',
-                tabs: { dashboard: '📊 Dashboard', upload: '📤 Data Upload', graph: '🕸️ Graph Visualization', qa: '🤖 Q&A Interface' },
+                tabs: { dashboard: '📊 Dashboard', upload: '📤 Data Upload', kb: '📚 Knowledge Base', graph: '🕸️ Graph Visualization', qa: '🤖 Q&A Interface' },
                 systemOverview: 'System Overview',
                 quickActions: 'Quick Actions',
                 qaUploadDocsBtn: '📤 Upload Documents',
@@ -1241,13 +1339,27 @@
                         return `Dataset "${friendlyName}" uploaded successfully${count === 1 ? ' (1 document)' : ` (${count} documents)`}!`;
                     }
                     return `Dataset "${friendlyName}" uploaded successfully!`;
-                }
+                },
+                kbTitle: 'Knowledge Base Configuration',
+                kbDesc: 'Manage schema, construction, decomposition and retrieval prompts per knowledge base. Select a KB when constructing or asking to use its config.',
+                kbCreateBtn: '➕ Create Knowledge Base',
+                kbFormTitleCreate: 'Create Knowledge Base',
+                kbFormTitleEdit: 'Edit Knowledge Base',
+                labelUploadKb: 'Use knowledge base (optional, for construct):',
+                labelQAKb: 'Knowledge base (optional):',
+                labelUploadSchema: 'Schema (optional, for this upload):',
+                labelConstructIncremental: 'Incremental update (merge with existing graph)',
+                editSchemaModalTitle: 'Edit Schema',
+                mergeGraphsTitle: 'Merge Graphs',
+                mergeGraphsDesc: 'Select two or more datasets with constructed graphs, then merge into a new graph.',
+                labelMergeSources: 'Source datasets (with graphs):',
+                labelMergeTarget: 'Target graph name:'
             },
             zh: {
                 processing: '正在处理你的问题…',
                 pleaseSelectAndEnter: '请选择数据集并输入问题',
                 subtitle: '✨ 面向图检索增强复杂推理的统一式智能体 ✨',
-                tabs: { dashboard: '📊 仪表盘', upload: '📤 数据上传', graph: '🕸️ 图谱可视化', qa: '🤖 问答接口' },
+                tabs: { dashboard: '📊 仪表盘', upload: '📤 数据上传', kb: '📚 知识库配置', graph: '🕸️ 图谱可视化', qa: '🤖 问答接口' },
                 systemOverview: '系统概览',
                 quickActions: '快捷操作',
                 qaUploadDocsBtn: '📤 上传文档',
@@ -1285,7 +1397,21 @@
                         return `数据集“${friendlyName}”上传成功${count === 1 ? '（1篇文档）' : `（共${count}篇文档）`}！`;
                     }
                     return `数据集“${friendlyName}”上传成功！`;
-                }
+                },
+                kbTitle: '知识库配置',
+                kbDesc: '按知识库管理 Schema、构建/分解/检索 Prompt。构建或提问时选择知识库即可使用其配置。',
+                kbCreateBtn: '➕ 新建知识库',
+                kbFormTitleCreate: '新建知识库',
+                kbFormTitleEdit: '编辑知识库',
+                labelUploadKb: '使用知识库（可选，用于构建）：',
+                labelQAKb: '知识库（可选）：',
+                labelUploadSchema: 'Schema（可选，用于本次上传）：',
+                labelConstructIncremental: '增量更新（与现有图合并）',
+                editSchemaModalTitle: '编辑 Schema',
+                mergeGraphsTitle: '合并图谱',
+                mergeGraphsDesc: '选择两个及以上已构建图谱的数据集，合并为新图谱。',
+                labelMergeSources: '源数据集（已有图谱）：',
+                labelMergeTarget: '目标图谱名称：'
             }
         };
 
@@ -1295,6 +1421,7 @@
             const subtitle = document.getElementById('subtitleText'); if (subtitle) subtitle.textContent = t.subtitle;
             const tabDashboard = document.getElementById('tabDashboard'); if (tabDashboard) tabDashboard.textContent = t.tabs.dashboard;
             const tabUpload = document.getElementById('tabUpload'); if (tabUpload) tabUpload.textContent = t.tabs.upload;
+            const tabKb = document.getElementById('tabKb'); if (tabKb) tabKb.textContent = t.tabs.kb;
             const tabGraph = document.getElementById('tabGraph'); if (tabGraph) tabGraph.textContent = t.tabs.graph;
             const tabQA = document.getElementById('tabQA'); if (tabQA) tabQA.textContent = t.tabs.qa;
             // Dashboard
@@ -1328,10 +1455,28 @@
             const procText = document.getElementById('qaProcessingText'); if (procText) procText.textContent = t.processing;
             const badge = document.getElementById('qaCompletionBadge'); if (badge && badge.style.display !== 'none') badge.textContent = t.completedBadge;
 
+            // KB tab
+            const kbTitle = document.getElementById('kbTitle'); if (kbTitle) kbTitle.textContent = t.kbTitle;
+            const kbDesc = document.getElementById('kbDesc'); if (kbDesc) kbDesc.textContent = t.kbDesc;
+            const kbCreateBtn = document.getElementById('kbCreateBtn'); if (kbCreateBtn) kbCreateBtn.textContent = t.kbCreateBtn;
+            const labelUploadKb = document.getElementById('labelUploadKb'); if (labelUploadKb) labelUploadKb.textContent = t.labelUploadKb;
+            const labelQAKb = document.getElementById('labelQAKb'); if (labelQAKb) labelQAKb.textContent = t.labelQAKb;
+            const labelUploadSchema = document.getElementById('labelUploadSchema'); if (labelUploadSchema) labelUploadSchema.textContent = t.labelUploadSchema;
+            const labelConstructIncremental = document.getElementById('labelConstructIncremental'); if (labelConstructIncremental) labelConstructIncremental.innerHTML = '<input type="checkbox" id="constructIncremental" style="margin-right:8px;">' + t.labelConstructIncremental;
+            const editSchemaModalTitle = document.getElementById('editSchemaModalTitle'); if (editSchemaModalTitle) editSchemaModalTitle.textContent = t.editSchemaModalTitle;
+            const mergeGraphsTitle = document.getElementById('mergeGraphsTitle'); if (mergeGraphsTitle) mergeGraphsTitle.textContent = t.mergeGraphsTitle;
+            const mergeGraphsDesc = document.getElementById('mergeGraphsDesc'); if (mergeGraphsDesc) mergeGraphsDesc.textContent = t.mergeGraphsDesc;
+            const labelMergeSources = document.getElementById('labelMergeSources'); if (labelMergeSources) labelMergeSources.textContent = t.labelMergeSources;
+            const labelMergeTarget = document.getElementById('labelMergeTarget'); if (labelMergeTarget) labelMergeTarget.textContent = t.labelMergeTarget;
+            const kbFormTitle = document.getElementById('kbFormTitle'); if (kbFormTitle) kbFormTitle.textContent = editingKbId ? t.kbFormTitleEdit : t.kbFormTitleCreate;
+
             // Refresh dataset renderings to reflect language-specific labels
             displayDatasets();
+            displayKnowledgeBases();
             loadDatasetOptions('graphDataset');
             loadDatasetOptions('qaDataset');
+            loadKbOptions('uploadKb');
+            loadKbOptions('qaKb');
         }
 
         // API base URL
@@ -1400,10 +1545,15 @@
             // Load data for specific tabs
             if (tabName === 'upload') {
                 loadDatasets();
+                loadKbOptions('uploadKb');
+                loadSchemaOptions('uploadSchema');
+            } else if (tabName === 'kb') {
+                loadDatasets().then(() => loadKnowledgeBases());
             } else if (tabName === 'graph') {
                 loadDatasetOptions('graphDataset');
             } else if (tabName === 'qa') {
                 loadDatasetOptions('qaDataset');
+                loadKbOptions('qaKb');
             }
         }
 
@@ -1493,6 +1643,8 @@
             const formData = new FormData();
             selectedFiles.forEach(file => formData.append('files', file));
             formData.append('client_id', 'web_client');
+            const schemaSource = document.getElementById('uploadSchema') && document.getElementById('uploadSchema').value;
+            if (schemaSource) formData.append('schema_source_id', schemaSource);
 
             const progressSection = document.getElementById('uploadProgress');
             const progressFill = document.getElementById('progressFill');
@@ -1562,10 +1714,43 @@
                 const response = await axios.get(`${API_BASE}/api/datasets`);
                 datasets = response.data.datasets || [];
                 displayDatasets();
+                displayMergeSources();
                 updateStats();
             } catch (error) {
                 console.error('Failed to load datasets:', error);
                 showMessage('Failed to load datasets', 'error');
+            }
+        }
+
+        function displayMergeSources() {
+            const container = document.getElementById('mergeSourcesList');
+            if (!container) return;
+            const ready = datasets.filter(d => d.status === 'ready');
+            container.innerHTML = ready.map(d => `<label style="display:inline-flex;align-items:center;gap:6px;color:rgba(255,255,255,0.9);"><input type="checkbox" class="merge-source-cb" data-dataset="${d.name}">${formatDatasetDisplayName(d)}</label>`).join('');
+        }
+
+        async function mergeGraphs() {
+            const checked = document.querySelectorAll('.merge-source-cb:checked');
+            const sourceDatasets = Array.from(checked).map(el => el.dataset.dataset);
+            const targetName = (document.getElementById('mergeTargetName').value || '').trim();
+            if (sourceDatasets.length < 2) {
+                showMessage('Select at least 2 datasets to merge', 'error');
+                return;
+            }
+            if (!targetName) {
+                showMessage('Enter a target graph name', 'error');
+                return;
+            }
+            try {
+                showMessage('Merging graphs...', 'info');
+                await axios.post(`${API_BASE}/api/graph/merge`, { source_datasets: sourceDatasets, target_name: targetName });
+                showMessage('Graphs merged successfully. View in Graph tab.', 'success');
+                loadDatasets();
+                loadDatasetOptions('graphDataset');
+                document.getElementById('mergeTargetName').value = '';
+                document.querySelectorAll('.merge-source-cb').forEach(cb => cb.checked = false);
+            } catch (e) {
+                showMessage('Merge failed: ' + (e.response?.data?.detail || e.message), 'error');
             }
         }
 
@@ -1597,7 +1782,11 @@
                             ''
                         }
                         ${dataset.type !== 'demo' ? 
-                            `<button class="btn" onclick="triggerSchemaUpload('${dataset.name}')" title="Upload custom schema">📚 Upload Schema</button>` : 
+                            `<button class="btn" onclick="openEditSchemaModal('${dataset.name}')" title="Edit schema">✏️ Edit Schema</button>` : 
+                            ''
+                        }
+                        ${dataset.type !== 'demo' ? 
+                            `<button class="btn" onclick="triggerSchemaUpload('${dataset.name}')" title="Upload schema file">📚 Upload Schema File</button>` : 
                             ''
                         }
                         ${dataset.type !== 'demo' ? 
@@ -1649,6 +1838,44 @@
             const input = ensureSchemaFileInput();
             input.dataset.datasetName = datasetName;
             input.click();
+        }
+
+        async function openEditSchemaModal(datasetName) {
+            editingSchemaDatasetName = datasetName;
+            document.getElementById('editSchemaModal').classList.remove('hidden');
+            document.getElementById('editSchemaModalBackdrop').classList.remove('hidden');
+            const t = i18n[currentLang] || i18n.en;
+            document.getElementById('editSchemaModalTitle').textContent = (t.editSchemaModalTitle || 'Edit Schema') + ': ' + datasetName;
+            try {
+                const res = await axios.get(`${API_BASE}/api/datasets/${datasetName}/schema`);
+                document.getElementById('editSchemaText').value = JSON.stringify(res.data, null, 2);
+            } catch (e) {
+                showMessage('Failed to load schema: ' + (e.response?.data?.detail || e.message), 'error');
+                document.getElementById('editSchemaText').value = '{}';
+            }
+        }
+        function closeEditSchemaModal() {
+            document.getElementById('editSchemaModal').classList.add('hidden');
+            document.getElementById('editSchemaModalBackdrop').classList.add('hidden');
+            editingSchemaDatasetName = null;
+        }
+        async function saveDatasetSchema() {
+            if (!editingSchemaDatasetName) return;
+            let schema;
+            try {
+                schema = JSON.parse(document.getElementById('editSchemaText').value);
+            } catch (e) {
+                showMessage('Invalid JSON', 'error');
+                return;
+            }
+            try {
+                await axios.put(`${API_BASE}/api/datasets/${editingSchemaDatasetName}/schema`, { schema });
+                showMessage('Schema saved', 'success');
+                closeEditSchemaModal();
+                loadDatasets();
+            } catch (e) {
+                showMessage('Failed to save schema: ' + (e.response?.data?.detail || e.message), 'error');
+            }
         }
 
         async function constructGraph(datasetName) {
@@ -1703,10 +1930,14 @@
                     console.log('WebSocket connection closed');
                 };
 
-                // Send construct request
-                const response = await axios.post(`${API_BASE}/api/construct-graph`, {
-                    dataset_name: datasetName
-                }, {
+                // Send construct request (optional kb_id from upload KB selector)
+                const uploadKbEl = document.getElementById('uploadKb');
+                const kbId = uploadKbEl && uploadKbEl.value ? uploadKbEl.value : null;
+                const payload = { dataset_name: datasetName };
+                if (kbId) payload.kb_id = kbId;
+                const incEl = document.getElementById('constructIncremental');
+                if (incEl && incEl.checked) payload.incremental = true;
+                const response = await axios.post(`${API_BASE}/api/construct-graph`, payload, {
                     params: { client_id: 'web_client' }
                 });
 
@@ -1836,11 +2067,11 @@
             document.getElementById('stat-questions').textContent = questionCount;
         }
 
-        function loadDatasetOptions(selectId) {
+        function loadDatasetOptions(selectId, allDatasets) {
             const select = document.getElementById(selectId);
             if (!select) return;
 
-            const readyDatasets = datasets.filter(d => d.status === 'ready');
+            const readyDatasets = allDatasets ? datasets : datasets.filter(d => d.status === 'ready');
             const currentValue = select.value;
             const langConfig = i18n[currentLang] || i18n.en;
             const placeholder = langConfig?.selectDatasetPlaceholder || 'Select a dataset...';
@@ -1850,6 +2081,164 @@
 
             if (readyDatasets.some(d => d.name === currentValue)) {
                 select.value = currentValue;
+            }
+        }
+
+        async function loadKbOptions(selectId) {
+            const select = document.getElementById(selectId);
+            if (!select) return;
+            try {
+                const response = await axios.get(`${API_BASE}/api/knowledge-bases`);
+                const kbs = response.data.knowledge_bases || [];
+                const currentValue = select.value;
+                select.innerHTML = '<option value="">Use default config</option>' +
+                    kbs.map(kb => `<option value="${kb.id}">${(kb.name || kb.id)} (${kb.dataset_name || ''})</option>`).join('');
+                if (kbs.some(kb => kb.id === currentValue)) select.value = currentValue;
+            } catch (e) {
+                console.error('Failed to load knowledge bases:', e);
+                select.innerHTML = '<option value="">Use default config</option>';
+            }
+        }
+
+        async function loadSchemaOptions(selectId) {
+            const select = document.getElementById(selectId);
+            if (!select) return;
+            try {
+                const response = await axios.get(`${API_BASE}/api/schemas`);
+                const schemas = response.data.schemas || [];
+                const currentValue = select.value;
+                select.innerHTML = '<option value="">Default (use dataset default later)</option>' +
+                    schemas.map(s => `<option value="${s.id}">${s.type === 'kb' ? 'KB: ' : 'File: '}${s.name || s.id}</option>`).join('');
+                if (schemas.some(s => s.id === currentValue)) select.value = currentValue;
+            } catch (e) {
+                console.error('Failed to load schemas:', e);
+                select.innerHTML = '<option value="">Default (use dataset default later)</option>';
+            }
+        }
+
+        async function loadKnowledgeBases() {
+            try {
+                const response = await axios.get(`${API_BASE}/api/knowledge-bases`);
+                knowledgeBases = response.data.knowledge_bases || [];
+                displayKnowledgeBases();
+                loadDatasetOptions('kbFormDataset', true);
+            } catch (e) {
+                console.error('Failed to load knowledge bases:', e);
+                knowledgeBases = [];
+                displayKnowledgeBases();
+            }
+        }
+
+        function displayKnowledgeBases() {
+            const container = document.getElementById('kbList');
+            if (!container) return;
+            if (knowledgeBases.length === 0) {
+                container.innerHTML = '<p style="color: rgba(255,255,255,0.6);">No knowledge bases yet. Create one to manage schema and prompts per dataset.</p>';
+                return;
+            }
+            container.innerHTML = knowledgeBases.map(kb => `
+                <div class="file-item">
+                    <div>
+                        <strong>${(kb.name || kb.id)}</strong>
+                        <span style="color: rgba(255,255,255,0.6);"> — ${kb.dataset_name || '-'}</span>
+                    </div>
+                    <div class="dataset-actions">
+                        <button class="btn btn-secondary" onclick="editKb('${kb.id}')">Edit</button>
+                        <button class="btn btn-danger" onclick="deleteKb('${kb.id}', '${(kb.name || kb.id).replace(/'/g, "\\'")}')">Delete</button>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function openKbForm(kbId) {
+            editingKbId = kbId || null;
+            const t = i18n[currentLang] || i18n.en;
+            document.getElementById('kbFormCard').classList.remove('hidden');
+            document.getElementById('kbFormTitle').textContent = editingKbId ? t.kbFormTitleEdit : t.kbFormTitleCreate;
+            document.getElementById('kbFormSaveBtn').textContent = editingKbId ? (currentLang === 'zh' ? '更新' : 'Update') : (currentLang === 'zh' ? '保存' : 'Save');
+            if (editingKbId) {
+                axios.get(`${API_BASE}/api/knowledge-bases/${editingKbId}`).then(res => {
+                    const kb = res.data;
+                    document.getElementById('kbFormName').value = kb.name || '';
+                    document.getElementById('kbFormDataset').value = kb.dataset_name || '';
+                    document.getElementById('kbFormSchema').value = typeof kb.schema === 'object' ? JSON.stringify(kb.schema, null, 2) : (kb.schema || '');
+                    const p = kb.prompts || {};
+                    document.getElementById('kbFormConstruction').value = p.construction || '';
+                    document.getElementById('kbFormDecomposition').value = p.decomposition || '';
+                    document.getElementById('kbFormRetrieval').value = p.retrieval || '';
+                }).catch(e => {
+                    showMessage('Failed to load knowledge base: ' + (e.response?.data?.detail || e.message), 'error');
+                });
+            } else {
+                document.getElementById('kbFormName').value = '';
+                document.getElementById('kbFormDataset').value = '';
+                document.getElementById('kbFormSchema').value = '{"Nodes": ["person", "location", "organization"], "Relations": ["related_to", "located_in"], "Attributes": ["name", "date"]}';
+                document.getElementById('kbFormConstruction').value = '';
+                document.getElementById('kbFormDecomposition').value = '';
+                document.getElementById('kbFormRetrieval').value = '';
+            }
+        }
+
+        function closeKbForm() {
+            document.getElementById('kbFormCard').classList.add('hidden');
+            editingKbId = null;
+        }
+
+        function editKb(kbId) {
+            openKbForm(kbId);
+        }
+
+        async function saveKb() {
+            const name = document.getElementById('kbFormName').value.trim();
+            const dataset_name = document.getElementById('kbFormDataset').value.trim();
+            if (!name) {
+                showMessage('Please enter a name', 'error');
+                return;
+            }
+            if (!dataset_name) {
+                showMessage('Please select a dataset', 'error');
+                return;
+            }
+            let schema = null;
+            try {
+                const schemaText = document.getElementById('kbFormSchema').value.trim();
+                if (schemaText) schema = JSON.parse(schemaText);
+            } catch (e) {
+                showMessage('Invalid schema JSON', 'error');
+                return;
+            }
+            const prompts = {
+                construction: document.getElementById('kbFormConstruction').value.trim(),
+                decomposition: document.getElementById('kbFormDecomposition').value.trim(),
+                retrieval: document.getElementById('kbFormRetrieval').value.trim()
+            };
+            try {
+                if (editingKbId) {
+                    await axios.put(`${API_BASE}/api/knowledge-bases/${editingKbId}`, { name, dataset_name, schema, prompts });
+                    showMessage('Knowledge base updated', 'success');
+                } else {
+                    await axios.post(`${API_BASE}/api/knowledge-bases`, { name, dataset_name, schema, prompts });
+                    showMessage('Knowledge base created', 'success');
+                }
+                closeKbForm();
+                loadKnowledgeBases();
+                loadKbOptions('uploadKb');
+                loadKbOptions('qaKb');
+            } catch (e) {
+                showMessage('Failed to save: ' + (e.response?.data?.detail || e.message), 'error');
+            }
+        }
+
+        async function deleteKb(kbId, displayName) {
+            if (!confirm('Delete knowledge base "' + displayName + '"?')) return;
+            try {
+                await axios.delete(`${API_BASE}/api/knowledge-bases/${kbId}`);
+                showMessage('Knowledge base deleted', 'success');
+                loadKnowledgeBases();
+                loadKbOptions('uploadKb');
+                loadKbOptions('qaKb');
+            } catch (e) {
+                showMessage('Failed to delete: ' + (e.response?.data?.detail || e.message), 'error');
             }
         }
 
@@ -2010,10 +2399,11 @@
                 };
                 ws.onerror = () => {};
 
-                const response = await axios.post(`${API_BASE}/api/ask-question`, {
-                    question: question,
-                    dataset_name: datasetName
-                }, {
+                const qaKbEl = document.getElementById('qaKb');
+                const kbId = qaKbEl && qaKbEl.value ? qaKbEl.value : null;
+                const payload = { question: question, dataset_name: datasetName };
+                if (kbId) payload.kb_id = kbId;
+                const response = await axios.post(`${API_BASE}/api/ask-question`, payload, {
                     params: { client_id: 'web_client' }
                 });
 

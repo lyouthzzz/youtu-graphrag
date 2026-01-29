@@ -35,7 +35,8 @@ class KTRetriever:
         recall_paths: int = 2,
         schema_path: str = None,
         mode: str = "agent",
-        config=None
+        config=None,
+        retrieval_prompt_template: str = None,
     ):
 
         if config is None and get_config is not None:
@@ -75,6 +76,7 @@ class KTRetriever:
         self.schema_path = schema_path
         self.recall_paths = recall_paths
         self.mode = mode
+        self._retrieval_prompt_template = retrieval_prompt_template
         os.makedirs(cache_dir, exist_ok=True)
         self.debug_mode = True
 
@@ -1679,7 +1681,8 @@ class KTRetriever:
             }
 
     def generate_prompt(self, question: str, context: str) -> str:
-        
+        if self._retrieval_prompt_template:
+            return self._retrieval_prompt_template.format(question=question, context=context)
         if self.config:
             if self.dataset == 'novel':
                 return self.config.get_prompt_formatted("retrieval", "novel_chs", question=question, context=context)

@@ -15,16 +15,25 @@ from utils import call_llm_api, graph_processor, tree_comm
 from utils.logger import logger
 
 class KTBuilder:
-    def __init__(self, dataset_name, schema_path=None, mode=None, config=None):
+    def __init__(self, dataset_name, schema_path=None, mode=None, config=None, schema_dict=None, construction_prompt_template=None):
         if config is None:
             config = get_config()
         
         self.config = config
         self.dataset_name = dataset_name
-        self.schema = self.load_schema(schema_path or config.get_dataset_config(dataset_name).schema_path)
+        if schema_dict is not None:
+            self.schema = schema_dict
+        elif schema_path is not None:
+            self.schema = self.load_schema(schema_path)
+        else:
+            try:
+                self.schema = self.load_schema(config.get_dataset_config(dataset_name).schema_path)
+            except Exception:
+                self.schema = dict()
+        self._construction_prompt_template = construction_prompt_template
         self.graph = nx.MultiDiGraph()
         self.node_counter = 0
-        self.datasets_no_chunk = config.construction.datasets_no_chunk
+        self.datasets_no_chunk = getattr(config.construction, "datasets_no_chunk", []) or []
         self.token_len = 0
         self.lock = threading.Lock()
         self.llm_client = call_llm_api.LLMCompletionCall()
@@ -122,23 +131,20 @@ class KTBuilder:
         return len(encoding.encode(text))
     
     def _get_construction_prompt(self, chunk: str) -> str:
-        """Get the appropriate construction prompt based on dataset name and mode (agent/noagent)."""
+        """Get the appropriate construction prompt based on dataset name and mode (agent/noagent), or use custom template."""
         recommend_schema = json.dumps(self.schema, ensure_ascii=False)
-        
+        if self._construction_prompt_template:
+            return self._construction_prompt_template.format(schema=recommend_schema, chunk=chunk)
         # Base prompt type mapping
         prompt_type_map = {
             "novel": "novel",
             "novel_eng": "novel_eng"
         }
-        
         base_prompt_type = prompt_type_map.get(self.dataset_name, "general")
-        
-        # Add agent suffix if in agent mode
         if self.mode == "agent":
             prompt_type = f"{base_prompt_type}_agent"
         else:
             prompt_type = base_prompt_type
-        
         return self.config.get_prompt_formatted("construction", prompt_type, schema=recommend_schema, chunk=chunk)
     
     def _validate_and_parse_llm_response(self, prompt: str, llm_response: str) -> dict:
@@ -453,31 +459,29 @@ class KTBuilder:
                         self.graph.add_edge(kw, comm, relation="describes")
 
     def process_document(self, doc: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Process a single document and return its results."""
+        """Process a single document and return its results. In incremental mode, skips chunks already in self.all_chunks."""
         try:
             if not doc:
                 raise ValueError("Document is empty or None")
-            
             chunks, chunk2id = self.chunk_text(doc)
-            
             if not chunks or not chunk2id:
                 raise ValueError(f"No valid chunks generated from document. Chunks: {len(chunks)}, Chunk2ID: {len(chunk2id)}")
-            
+            existing_texts = set(self.all_chunks.values()) if getattr(self, "_incremental", False) else set()
             for chunk in chunks:
                 try:
                     id = next(key for key, value in chunk2id.items() if value == chunk)
                 except StopIteration:
                     id = nanoid.generate(size=8)
                     chunk2id[id] = chunk
-                
-                # Route to appropriate processing method based on mode
+                if getattr(self, "_incremental", False) and chunk in existing_texts:
+                    continue
+                existing_texts.add(chunk)
+                with self.lock:
+                    self.all_chunks[id] = chunk
                 if self.mode == "agent":
-                    # Agent mode: includes schema evolution capabilities
                     self.process_level1_level2_agent(chunk, id)
                 else:
-                    # NoAgent mode: standard processing without schema evolution
                     self.process_level1_level2(chunk, id)
-                
         except Exception as e:
             error_msg = f"Error processing document: {type(e).__name__}: {str(e)}"
             raise Exception(error_msg) from e
@@ -575,25 +579,56 @@ class KTBuilder:
     def save_graphml(self, output_path: str):
         graph_processor.save_graph(self.graph, output_path)
     
-    def build_knowledge_graph(self, corpus):
+    def _load_existing_graph_and_chunks(self, json_output_path: str, chunk_file: str) -> None:
+        """Load existing graph and chunks for incremental update. Sets self.graph, self.node_counter, self.all_chunks."""
+        if os.path.exists(json_output_path):
+            try:
+                self.graph = graph_processor.load_graph_from_json(json_output_path)
+                max_id = 0
+                for n in self.graph.nodes():
+                    parts = str(n).rsplit("_", 1)
+                    if len(parts) == 2:
+                        try:
+                            max_id = max(max_id, int(parts[1]))
+                        except ValueError:
+                            pass
+                self.node_counter = max_id + 1
+                logger.info(f"Loaded existing graph: {len(self.graph.nodes())} nodes, node_counter={self.node_counter}")
+            except Exception as e:
+                logger.warning(f"Failed to load existing graph: {e}")
+        if os.path.exists(chunk_file):
+            try:
+                with open(chunk_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and "\t" in line and line.startswith("id: ") and "Chunk: " in line:
+                            idx = line.index("\tChunk: ")
+                            chunk_id = line[4:idx].strip()
+                            chunk_text = line[idx + 8:].strip()
+                            self.all_chunks[chunk_id] = chunk_text
+                logger.info(f"Loaded existing chunks: {len(self.all_chunks)}")
+            except Exception as e:
+                logger.warning(f"Failed to load existing chunks: {e}")
+
+    def build_knowledge_graph(self, corpus, incremental: bool = False):
         logger.info(f"========{'Start Building':^20}========")
         logger.info(f"{'➖' * 30}")
-        
+        if incremental:
+            logger.info("Incremental mode: loading existing graph and chunks")
+        json_output_path = f"output/graphs/{self.dataset_name}_new.json"
+        chunk_file = f"output/chunks/{self.dataset_name}.txt"
+        if incremental:
+            self._load_existing_graph_and_chunks(json_output_path, chunk_file)
+        self._incremental = incremental
         with open(corpus, 'r', encoding='utf-8') as f:
             documents = json_repair.load(f)
-        
         self.process_all_documents(documents)
-        
+
         logger.info(f"All Process finished, token cost: {self.token_len}")
-        
         self.save_chunks_to_file()
-        
         output = self.format_output()
-        
-        json_output_path = f"output/graphs/{self.dataset_name}_new.json"
         os.makedirs("output/graphs", exist_ok=True)
         with open(json_output_path, 'w', encoding='utf-8') as f:
             json.dump(output, f, ensure_ascii=False, indent=2)
         logger.info(f"Graph saved to {json_output_path}")
-        
         return output

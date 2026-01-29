@@ -282,7 +282,6 @@ class ConfigManager:
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary format."""
         return {
-            "api": asdict(self.api),
             "datasets": {name: asdict(config) for name, config in self.datasets.items()},
             "triggers": asdict(self.triggers),
             "construction": asdict(self.construction),

@@ -7,7 +7,7 @@ except ImportError:
     get_config = None
 
 class GraphQ:
-    def __init__(self, dataset_name, config=None):
+    def __init__(self, dataset_name, config=None, decomposition_prompt_template=None):
         if config is None and get_config is not None:
             try:
                 self.config = get_config()
@@ -17,6 +17,7 @@ class GraphQ:
             self.config = config
         self.llm_client = call_llm_api.LLMCompletionCall()
         self.dataset_name = dataset_name
+        self._decomposition_prompt_template = decomposition_prompt_template
             
     def read_schema(self, schema_path: str) -> str:
         with open(schema_path, "r") as f:
@@ -24,6 +25,8 @@ class GraphQ:
         return schema
     
     def prompt_format(self, schema: str, question: str) -> str:
+        if self._decomposition_prompt_template:
+            return self._decomposition_prompt_template.format(ontology=schema, question=question)
         if self.config:
             if self.dataset_name == "anony_chs":
                 return self.config.get_prompt_formatted("decomposition", "anony_chs", ontology=schema, question=question)
@@ -98,8 +101,13 @@ class GraphQ:
                 ]
                 """
     
-    def decompose(self, question: str, schema_path: str) -> dict:
-        schema = self.read_schema(schema_path)
+    def decompose(self, question: str, schema_path: str = None, schema_str: str = None) -> dict:
+        if schema_str is not None:
+            schema = schema_str
+        elif schema_path:
+            schema = self.read_schema(schema_path)
+        else:
+            schema = ""
         prompt = self.prompt_format(schema, question)
         response = self.llm_client.call_api(prompt)
         content = json_repair.loads(response)
